@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
-
+from functools import partial
 from logging import getLogger
 
-from django.conf import settings
 from django.contrib import messages
 from django.contrib.sites.models import Site
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.core.urlresolvers import NoReverseMatch
-from django.utils.translation import get_language
-from django.utils.translation import ugettext_lazy as _
+from django.urls import NoReverseMatch
+from django.utils.functional import cached_property
+from django.utils.module_loading import autodiscover_modules
+from django.utils.translation import get_language_from_request, ugettext_lazy as _
 
-from cms.utils import get_cms_setting
-from cms.utils.django_load import load
+from cms.utils.conf import get_cms_setting
+from cms.utils.moderator import use_draft
 
 from menus.base import Menu
 from menus.exceptions import NamespaceAlreadyRegistered
 from menus.models import CacheKey
-
-import copy
 
 logger = getLogger('menus')
 
@@ -78,105 +76,71 @@ def _build_nodes_inner_for_one_menu(nodes, menu_class_name):
     return final_nodes
 
 
-class MenuPool(object):
-    def __init__(self):
-        self.menus = {}
-        self.modifiers = []
-        self.discovered = False
-        self._expanded = False
+def _get_menu_class_for_instance(menu_class, instance):
+    """
+    Returns a new menu class that subclasses
+    menu_class but is bound to instance.
+    This means it sets the "instance" attribute of the class.
+    """
+    attrs = {'instance': instance}
+    class_name = menu_class.__name__
+    meta_class = type(menu_class)
+    return meta_class(class_name, (menu_class,), attrs)
 
-    def discover_menus(self):
-        if self.discovered:
-            return
-        load('menu')
-        from menus.modifiers import register
-        register()
-        self.discovered = True
-        self._expanded = False
 
-    def _expand_menus(self):
-        """
-        Expands the menu_pool by converting any found CMSAttachMenu entries to
-        one entry for each instance they are attached to. and instantiates menus
-        from the existing menu classes.
-        """
+class MenuRenderer(object):
+    # The main logic behind this class is to decouple
+    # the singleton menu pool from the menu rendering logic.
+    # By doing this we can be sure that each request has it's
+    # private instance that will always have the same attributes.
 
-        # Ideally, this would have been done in discover_menus(), but the pages
-        # aren't loaded when that executes. This private method is used to
-        # perform the expansion and instantiate the menus classes into menu-
-        # instances just before any menus are built.
+    def __init__(self, pool, request):
+        self.pool = pool
+        # It's important this happens on init
+        # because we need to make sure that a menu renderer
+        # points to the same registered menus as long as the
+        # instance lives.
+        self.menus = pool.get_registered_menus(for_rendering=True)
+        self.request = request
+        self.request_language = get_language_from_request(request, check_path=True)
+        self.site = Site.objects.get_current(request)
 
-        if self._expanded:
-            return
-        expanded_menus = {}
-        for menu_class_name, menu_cls in self.menus.items():
-            # In order to be eligible for "expansion", the menu_cls must, in
-            # fact, be an instantiable class. We are lenient about this here,
-            # though, because the CMS has previously allowed attaching
-            # CMSAttachMenu's as objects rather than classes.
-            if isinstance(menu_cls, Menu):
-                # A Menu **instance** was registered, this is non-standard, but
-                # acceptable. However, it cannot be "expanded", so, just add it
-                # as-is to the list of expanded_menus.
-                expanded_menus[menu_class_name] = menu_cls
-            elif hasattr(menu_cls, "get_instances"):
-                # It quacks like a CMSAttachMenu, expand away!
-                # If a menu exists but has no instances,
-                # it's included in the available menus as is
-                instances = menu_cls.get_instances()
-                if not instances:
-                    expanded_menus[menu_class_name] = menu_cls()
-                else:
-                    for instance in instances:
-                        namespace = "{0}:{1}".format(
-                            menu_class_name, instance.pk)
-                        menu_inst = menu_cls()
-                        menu_inst.instance = instance
-                        expanded_menus[namespace] = menu_inst
-            elif hasattr(menu_cls, "get_nodes"):
-                # This is another type of Menu, cannot be expanded, but must be
-                # instantiated, none-the-less.
-                expanded_menus[menu_class_name] = menu_cls()
-            else:
-                raise ValidationError(
-                    "Something was registered as a menu, but isn't.")
+    @property
+    def cache_key(self):
+        prefix = get_cms_setting('CACHE_PREFIX')
 
-        self._expanded = True
-        self.menus = expanded_menus
+        key = '%smenu_nodes_%s_%s' % (prefix, self.request_language, self.site.pk)
 
-    def clear(self, site_id=None, language=None, all=False):
-        '''
-        This invalidates the cache for a given menu (site_id and language)
-        '''
-        if all:
-            cache_keys = CacheKey.objects.get_keys()
+        if self.request.user.is_authenticated:
+            key += '_%s_user' % self.request.user.pk
+
+        if self.draft_mode_active:
+            key += ':draft'
         else:
-            cache_keys = CacheKey.objects.get_keys(site_id, language)
-        to_be_deleted = cache_keys.distinct().values_list('key', flat=True)
-        cache.delete_many(to_be_deleted)
-        cache_keys.delete()
+            key += ':public'
+        return key
 
-    def register_menu(self, menu_cls):
-        from menus.base import Menu
-        assert issubclass(menu_cls, Menu)
-        # If we should register a menu after we've already expanded the existing
-        # ones, we need to mark it as such.
-        self._expanded = False
-        if menu_cls.__name__ in self.menus.keys():
-            raise NamespaceAlreadyRegistered(
-                "[{0}] a menu with this name is already registered".format(
-                    menu_cls.__name__))
-        # Note: menu_cls should still be the menu CLASS at this point. It will
-        # be instantiated in self._expand_menus().
-        self.menus[menu_cls.__name__] = menu_cls
+    @cached_property
+    def draft_mode_active(self):
+        try:
+            # Under certain conditions, the request page won't match
+            # the requested state.
+            # For example, user requests draft page but gets public.
+            _use_draft = self.request.current_page.publisher_is_draft
+        except AttributeError:
+            _use_draft = use_draft(self.request)
+        return _use_draft
 
-    def register_modifier(self, modifier_class):
-        from menus.base import Modifier
-        assert issubclass(modifier_class, Modifier)
-        if modifier_class not in self.modifiers:
-            self.modifiers.append(modifier_class)
+    @cached_property
+    def is_cached(self):
+        db_cache_key_lookup = CacheKey.objects.filter(
+            key=self.cache_key,
+            language=self.request_language,
+            site=self.site.pk,
+        )
+        return db_cache_key_lookup.exists()
 
-    def _build_nodes(self, request, site_id):
+    def _build_nodes(self):
         """
         This is slow. Caching must be used.
         One menu is built per language and per site.
@@ -193,97 +157,209 @@ class MenuPool(object):
             else:
                 the node is put at the bottom of the list
         """
-        # Before we do anything, make sure that the menus are expanded.
-        self._expand_menus()
-        # Cache key management
-        lang = get_language()
-        prefix = getattr(settings, "CMS_CACHE_PREFIX", "menu_cache_")
-        key = "%smenu_nodes_%s_%s" % (prefix, lang, site_id)
-        if request.user.is_authenticated():
-            key += "_%s_user" % request.user.pk
+        key = self.cache_key
+
         cached_nodes = cache.get(key, None)
-        if cached_nodes:
+
+        if cached_nodes and self.is_cached:
+            # Only use the cache if the key is present in the database.
+            # This prevents a condition where keys which have been removed
+            # from the database due to a change in content, are still used.
             return cached_nodes
 
         final_nodes = []
+        toolbar = getattr(self.request, 'toolbar', None)
+
         for menu_class_name in self.menus:
-            menu = self.menus[menu_class_name]
+            menu = self.get_menu(menu_class_name)
+
             try:
-                nodes = menu.get_nodes(request)
+                nodes = menu.get_nodes(self.request)
             except NoReverseMatch:
                 # Apps might raise NoReverseMatch if an apphook does not yet
                 # exist, skip them instead of crashing
                 nodes = []
-                toolbar = getattr(request, 'toolbar', None)
                 if toolbar and toolbar.is_staff:
-                    messages.error(request,
+                    messages.error(self.request,
                         _('Menu %s cannot be loaded. Please, make sure all '
                           'its urls exist and can be resolved.') %
                         menu_class_name)
-                    logger.error("Menu %s could not be loaded." %
-                        menu_class_name, exc_info=True)
+                logger.error("Menu %s could not be loaded." %
+                    menu_class_name, exc_info=True)
             # nodes is a list of navigation nodes (page tree in cms + others)
-            final_nodes += _build_nodes_inner_for_one_menu(
-                nodes, menu_class_name)
+            final_nodes += _build_nodes_inner_for_one_menu(nodes, menu_class_name)
 
         cache.set(key, final_nodes, get_cms_setting('CACHE_DURATIONS')['menus'])
-        # We need to have a list of the cache keys for languages and sites that
-        # span several processes - so we follow the Django way and share through
-        # the database. It's still cheaper than recomputing every time!
-        # This way we can selectively invalidate per-site and per-language,
-        # since the cache shared but the keys aren't
-        CacheKey.objects.get_or_create(key=key, language=lang, site=site_id)
+
+        if not self.is_cached:
+            # No need to invalidate the internal lookup cache,
+            # just set the value directly.
+            self.__dict__['is_cached'] = True
+            # We need to have a list of the cache keys for languages and sites that
+            # span several processes - so we follow the Django way and share through
+            # the database. It's still cheaper than recomputing every time!
+            # This way we can selectively invalidate per-site and per-language,
+            # since the cache is shared but the keys aren't
+            CacheKey.objects.create(key=key, language=self.request_language, site=self.site.pk)
         return final_nodes
 
-    def apply_modifiers(self, nodes, request, namespace=None, root_id=None,
+    def _mark_selected(self, nodes):
+        for node in nodes:
+            node.selected = node.is_selected(self.request)
+        return nodes
+
+    def apply_modifiers(self, nodes, namespace=None, root_id=None,
             post_cut=False, breadcrumb=False):
         if not post_cut:
-            nodes = self._mark_selected(request, nodes)
-        for cls in self.modifiers:
-            inst = cls()
+            nodes = self._mark_selected(nodes)
+
+        # Only fetch modifiers when they're needed.
+        # We can do this because unlike menu classes,
+        # modifiers can't change on a request basis.
+        for cls in self.pool.get_registered_modifiers():
+            inst = cls(renderer=self)
             nodes = inst.modify(
-                request, nodes, namespace, root_id, post_cut, breadcrumb)
+                self.request, nodes, namespace, root_id, post_cut, breadcrumb)
         return nodes
 
-    def get_nodes(self, request, namespace=None, root_id=None, site_id=None,
-            breadcrumb=False):
+    def get_nodes(self, namespace=None, root_id=None, breadcrumb=False):
+        nodes = self._build_nodes()
+        nodes = self.apply_modifiers(
+            nodes=nodes,
+            namespace=namespace,
+            root_id=root_id,
+            post_cut=False,
+            breadcrumb=breadcrumb,
+        )
+        return nodes
+
+    def get_menu(self, menu_name):
+        MenuClass = self.menus[menu_name]
+        return MenuClass(renderer=self)
+
+
+class MenuPool(object):
+
+    def __init__(self):
+        self.menus = {}
+        self.modifiers = []
+        self.discovered = False
+
+    def get_renderer(self, request):
         self.discover_menus()
-        if not site_id:
-            site_id = Site.objects.get_current().pk
-        nodes = self._build_nodes(request, site_id)
-        nodes = copy.deepcopy(nodes)
-        nodes = self.apply_modifiers(nodes, request, namespace, root_id,
-                                     post_cut=False, breadcrumb=breadcrumb)
-        return nodes
+        # Returns a menu pool wrapper that is bound
+        # to the given request and can perform
+        # operations based on the given request.
+        return MenuRenderer(pool=self, request=request)
 
-    def _mark_selected(self, request, nodes):
-        sel = None
-        for node in nodes:
-            node.sibling = False
-            node.ancestor = False
-            node.descendant = False
-            node.selected = False
-            if node.get_absolute_url() == request.path[
-                    :len(node.get_absolute_url())]:
-                if sel:
-                    if len(node.get_absolute_url()) > len(
-                            sel.get_absolute_url()):
-                        sel = node
-                else:
-                    sel = node
+    def discover_menus(self):
+        if self.discovered:
+            return
+        autodiscover_modules('cms_menus')
+        from menus.modifiers import register
+        register()
+        self.discovered = True
+
+    def get_registered_menus(self, for_rendering=False):
+        """
+        Returns all registered menu classes.
+
+        :param for_rendering: Flag that when True forces us to include
+            all CMSAttachMenu subclasses, even if they're not attached.
+        """
+        self.discover_menus()
+        registered_menus = {}
+
+        for menu_class_name, menu_cls in self.menus.items():
+            if isinstance(menu_cls, Menu):
+                # A Menu **instance** was registered,
+                # this is non-standard, but acceptable.
+                menu_cls = menu_cls.__class__
+            if hasattr(menu_cls, "get_instances"):
+                # It quacks like a CMSAttachMenu.
+                # Expand the one CMSAttachMenu into multiple classes.
+                # Each class is bound to the instance the menu is attached to.
+                _get_menu_class = partial(_get_menu_class_for_instance, menu_cls)
+
+                instances = menu_cls.get_instances() or []
+                for instance in instances:
+                    # For each instance, we create a unique class
+                    # that is bound to that instance.
+                    # Doing this allows us to delay the instantiation
+                    # of the menu class until it's needed.
+                    # Plus we keep the menus consistent by always
+                    # pointing to a class instead of an instance.
+                    namespace = "{0}:{1}".format(
+                        menu_class_name, instance.pk)
+                    registered_menus[namespace] = _get_menu_class(instance)
+
+                if not instances and not for_rendering:
+                    # The menu is a CMSAttachMenu but has no instances,
+                    # normally we'd just ignore it but it's been
+                    # explicitly set that we are not rendering these menus
+                    # via the (for_rendering) flag.
+                    registered_menus[menu_class_name] = menu_cls
+            elif hasattr(menu_cls, "get_nodes"):
+                # This is another type of Menu, cannot be expanded, but must be
+                # instantiated, none-the-less.
+                registered_menus[menu_class_name] = menu_cls
             else:
-                node.selected = False
-        if sel:
-            sel.selected = True
-        return nodes
+                raise ValidationError(
+                    "Something was registered as a menu, but isn't.")
+        return registered_menus
+
+    def get_registered_modifiers(self):
+        return self.modifiers
+
+    def clear(self, site_id=None, language=None, all=False):
+        '''
+        This invalidates the cache for a given menu (site_id and language)
+        '''
+        if all:
+            cache_keys = CacheKey.objects.get_keys()
+        else:
+            cache_keys = CacheKey.objects.get_keys(site_id, language)
+
+        to_be_deleted = cache_keys.distinct().values_list('key', flat=True)
+
+        if to_be_deleted:
+            cache.delete_many(to_be_deleted)
+            cache_keys.delete()
+
+    def register_menu(self, menu_cls):
+        from menus.base import Menu
+        assert issubclass(menu_cls, Menu)
+        if menu_cls.__name__ in self.menus:
+            raise NamespaceAlreadyRegistered(
+                "[{0}] a menu with this name is already registered".format(
+                    menu_cls.__name__))
+        # Note: menu_cls should still be the menu CLASS at this point.
+        self.menus[menu_cls.__name__] = menu_cls
+
+    def register_modifier(self, modifier_class):
+        from menus.base import Modifier
+        assert issubclass(modifier_class, Modifier)
+        if modifier_class not in self.modifiers:
+            self.modifiers.append(modifier_class)
 
     def get_menus_by_attribute(self, name, value):
-        self.discover_menus()
-        return [(menu_class_name, menu.name)
-                for menu_class_name, menu in self.menus.items()
-                if getattr(menu, name, None) == value]
+        """
+        Returns the list of menus that match the name/value criteria provided.
+        """
+        # Note that we are limiting the output to only single instances of any
+        # specific menu class. This is to address issue (#4041) which has
+        # cropped-up in 3.0.13/3.0.0.
+        # By setting for_rendering to False
+        # we're limiting the output to menus
+        # that are registered and have instances
+        # (in case of attached menus).
+        menus = self.get_registered_menus(for_rendering=False)
+        return sorted(list(set([(menu.__name__, menu.name)
+                                for menu_class_name, menu in menus.items()
+                                if getattr(menu, name, None) == value])))
 
     def get_nodes_by_attribute(self, nodes, name, value):
         return [node for node in nodes if node.attr.get(name, None) == value]
+
 
 menu_pool = MenuPool()

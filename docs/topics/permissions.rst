@@ -2,104 +2,184 @@
 Permissions
 ###########
 
-In django CMS you can set three types of permissions:
+The django CMS permissions system is flexible, granular and multi-layered.
 
-#. View restrictions for restricting front-end view access to users
-#. Page permissions for allowing staff users to only have rights on certain sections of certain sites
-#. Mode permission which when left unset, restricts staff users to only editing, not adding new content
-
-To enable features 1. and 2., ``settings.py`` requires::
-
-    CMS_PERMISSION = True
-
-The third one is controlled by the "**Can use Structure mode**" Django permission.
-
-*****************
-View restrictions
-*****************
-
-View restrictions can be set-up from the *View restrictions* formset on any cms page.
-Once a page has at least one view restriction installed, only users with granted access will be able to see that page.
-Mind that this restriction is for viewing the page as an end-user (front-end view), not viewing the page in the admin interface!
-
-View restrictions are also controlled by the ``CMS_PUBLIC_FOR`` setting. Possible values are ``all`` and ``staff``.
-This setting decides if pages without any view restrictions are:
-
-* viewable by everyone -- including anonymous users (*all*)
-* viewable by staff users only (*staff*)
 
 ****************
-Page permissions
+Permission modes
 ****************
 
-After setting ``CMS_PERMISSION = True`` you will have three new models in the admin index:
+Permissions operate in two different modes, depending on the :setting:`CMS_PERMISSION` setting.
 
-1. Users (page)
-2. User groups (page)
-3. Pages global permissions
+* Simple permissions mode (``CMS_PERMISSION = False``): only the standard Django Users and Groups
+  permissions will apply. This is the default.
+* Page permissions mode (``CMS_PERMISSION = True``): as well as standard Django permissions, django
+  CMS provides row-level permissions on pages, allowing you to control the access of users to
+  different sections of a site, and sites within a multi-site project.
 
-.. _users-page-permissions:
+.. _key-user-permissions:
 
-Users (page) / User groups (page)
-=================================
+********************
+Key user permissions
+********************
 
-Using *Users (page)* you can easily add users with permissions over CMS pages.
+You can find the permissions you can set for a user or groups in the Django admin, in the
+*Authentication and Authorization* section. These apply equally in Simple permissions mode and
+Page permissions mode.
 
-You would be able to create a user with the same set of permissions using the usual *Auth.User* model, but using *Users (page)* is more convenient.
+Filtering by ``cms`` will show the ones that belong to the CMS application. Permissions that a CMS
+editor will need are likely to include:
 
-A new user created using *Users (page)* with given page add/edit/delete rights will not be able to make any changes to pages straight away.
-The user must first be assigned to a set of pages over which he may exercise these rights.
-This is done using the :ref:`page-permissions`. formset on any page or by using :ref:`pages-global-permissions`.
+* ``cms | cms plugin``
+* ``cms | page``
+* ``cms | placeholder``
+* ``cms | placeholder reference``
+* ``cms | static placeholder``
+* ``cms | placeholder reference``
+* ``cms | title``
 
-*User groups (page)* manages the same feature on the group level.
+Most of these offer the usual add/change/delete options, though there are some exceptions, such as
+``cms | placeholder | Can use Structure mode``.
 
-.. _page-permissions:
-
-Page permissions
-================
-
-The *Page permission* formset has multiple checkboxes defining different permissions: can edit, can add, can delete, can change advanced settings, can publish, can move and can change permission.
-These define what kind of actions the user/group can do on the pages on which the permissions are being granted through the *Grant on* drop-down.
-
-*Can change permission* refers to whether the user can change the permissions of his subordinate users. Bob is the subordinate of Alice if one of:
-
-* Bob was created by Alice
-* Bob has at least one page permission set on one of the pages on which Alice has the *Can change permissions* right
+See :ref:`use-permissions-on-groups` below on applying permissions to groups rather than users.
 
 
-**Note:** Mind that even though a new user has permissions to change a page, that doesn't give him permissions to add a plugin within that page.
-In order to be able to add/change/delete plugins on any page, you will need to go through the usual *Auth.User* model and give the new user permissions to each plugin you want him to have access to.
-Example: if you want the new user to be able to use the text plugin, you will need to give him the following rights: ``text | text | Can add text``, ``text | text | Can change text``, ``text | text | Can delete text``.
+************************************
+Permissions in Page permissions mode
+************************************
+
+In Page permissions mode, you also need to give users permission to the right pages and sub-sites.
+
+
+.. _global-and-per-page-permissions:
+
+Global and per-page permissions
+===============================
+
+This can be done in two ways, *globally* or *per-page*.
 
 .. _pages-global-permissions:
 
-Pages global permissions
-========================
+**Global page permissions** apply to all pages (or all pages on a sub-site in a multi-site
+project). Global page permissions are managed in the admin at *django CMS* > *Pages global
+permissions*.
 
-Using the *Pages global permissions* model you can give a set of permissions to all pages in a set of sites.
+**Per-page permissions** apply to a specific page and/or its children and/or its descendants.
+Per-page permissions are managed via the toolbar (*Page* > *Permissions*) when on the page in
+question, in edit mode.
 
-.. note:: You always **must** set the sites managed py the global permissions, even if you only have one site.
+Your users (unless they are Django superusers) will need at least one of global page permissions or
+per-page permissions granted to them in order to be able to edit any pages at all.
 
-.. _structure_mode_permissions:
+They will **also** need appropriate :ref:`user permissions <key-user-permissions>`, otherwise they
+will have no edit rights to pages.
 
-********************
-Edit mode permission
-********************
+.. _page-permission-options:
 
-.. versionchanged:: 3.1
+Page permission options
+=======================
 
-django CMS uses **Structure** and **Content** modes for different type of content editing;
-while the former allows full control over the plugins layout, positioning and to add new
-plugins to the page, the latter only allow editing existing plugins.
+Both global page permissions and per-page permissions can be assigned to users or groups of users.
+They include:
 
-From version 3.1 the specific permission "**Can use Structure mode**" exists to permit access
-to Structure Mode. This allows defining a different level of permissions on the same content.
+* *Can add*
+* *Can edit*
+* *Can delete*
+* *Can publish*
+* *Can change advanced settings*
+* *Can change permissions*
+* *Can move*
 
-This permission also applies to ``PlaceholderField`` defined on models.
+.. _important:
 
-****************
-File Permissions
-****************
+    Even though a user may have *Can edit* permissions on a page, that doesn't give them
+    permissions to add or change plugins *within* that page. In order to be able to
+    add/change/delete plugins on any page, you will need to go through :ref:`the standard Django
+    permissions <key-user-permissions>` to provide users with the actions they can perform, for
+    example:
 
-django CMS does not take care of and no responsibility for controlling access to files. Please make sure to use either
-a prebuilt solution (like `django-filer <https://github.com/stefanfoulis/django-filer>`_) or to roll your own.
+    * ``cms | page | Can publish page`` to publish it
+    * ``cms | cms plugins | Can edit cms plugin`` to edit plugins on the page
+
+
+.. _pages-specific-permissions:
+
+Per-page permissions
+====================
+
+Per-page permissions are controlled by selecting *Permissions* from the *Page* menu in the toolbar
+when on the page (this options is only available when ``CMS_PERMISSION`` mode is on).
+
+*Login required* determines whether anonymous visitors will be able to see the page at all.
+
+*Menu visibility* determines who'll be able to see the page in navigation menus - everyone, or logged in or anonymous users
+only.
+
+.. _view-restrictions:
+
+*View restrictions* determine which groups and users will be able to see the page when it is
+published. Adding a view restriction will allow you to set this. Note that this doesn't apply any
+restrictions to users who are also editors with appropriate permissions.
+
+*Page permissions* determine what editors can do to a page (or hierarchy of pages). They are
+described above in :ref:`page-permission-options`.
+
+
+New admin models
+----------------
+
+When ``CMS_PERMISSION`` is enabled, as well as :ref:`Pages global permissions
+<pages-global-permissions>` you will find two new models available in the CMS admin:
+
+* *User groups (page)*
+* *Users (page)*
+
+You will find that the latter two simply reflect the Django Groups and User permissions that
+already exist in the system, and can be ignored.
+
+
+.. _permission-strategies:
+
+*********************
+Permission strategies
+*********************
+
+For a simple site with only a few users you may not need to be concerned about this, but with
+thousands of pages belonging to different departments and users with greatly differing levels of
+authority and expertise, it is important to understand who is able to do what on your site.
+
+
+.. _use-permissions-on-groups:
+
+Use permissions on Groups, not on Users
+=======================================
+
+Avoid applying permissions to individual users unless strictly necessary. It's far better to apply
+them to Groups, and add Users to Groups. Otherwise, you risk ending up with large numbers of Users
+with unknown or inappropriate permissions.
+
+
+Use Groups to build up permissions
+==================================
+
+Different users may require different subsets of permissions. For example, you could define a
+*Basic content editor* group, who can edit and publish pages and content, but who don't have
+permission to create new ones; that permission would be granted to a *Lead content editor* Group.
+Another Group could have permissions to use the weblog.
+
+Then, when managing a user, place the user into the appropriate groups.
+
+
+Two dimensions of permissions
+-----------------------------
+
+You can divide your users' permissions across two dimensions:
+
+* what sort of things this user or group of user should be allowed to do (e.g. publish pages, add
+  new plugins, create new users, etc)
+* which sections of the site the user should be allowed to do them on (the home page, a limited set
+  of departmental pages, etc)
+
+Groups are very useful for managing this. For example, you can create a *Europe* group for editors
+who are allowed to edit the Europe page hierarchy or sub-site. The group can then be added to a
+:ref:`global or per-page permission <global-and-per-page-permissions>`.

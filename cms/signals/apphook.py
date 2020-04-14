@@ -1,91 +1,28 @@
 # -*- coding: utf-8 -*-
+import logging
 import sys
-from django.core.management import color_style
-from django.core.urlresolvers import clear_url_caches
-from django.core.signals import request_finished
-from cms.models import Title
 
+from django.core.management import color_style
+from django.core.signals import request_finished
+from django.urls import clear_url_caches
+
+from cms.utils.apphook_reload import mark_urlconf_as_changed
+
+
+logger = logging.getLogger(__name__)
 
 DISPATCH_UID = 'cms-restart'
 
 
-def apphook_pre_title_checker(instance, **kwargs):
+def trigger_server_restart(**kwargs):
     """
-    Store the old application_urls and path on the instance
+    Marks the URLs as stale so that they can be reloaded.
     """
-    if instance.publisher_is_draft:
-        return
-    try:
-        instance._old_data = Title.objects.filter(pk=instance.pk).select_related('page')[0]
-    except IndexError:
-        instance._old_data = None
+    mark_urlconf_as_changed()
 
 
-def apphook_post_page_checker(page):
-    old_page = page.old_page
-    if (old_page and (
-                old_page.application_urls != page.application_urls or old_page.application_namespace != page.application_namespace)) or (
-            not old_page and page.application_urls):
-
-        from cms.views import invalidate_cms_page_cache
-        invalidate_cms_page_cache()
-        request_finished.connect(trigger_restart, dispatch_uid=DISPATCH_UID)
-
-
-def apphook_post_title_checker(instance, **kwargs):
-    """
-    Check if applciation_urls and path changed on the instance
-    """
-    if instance.publisher_is_draft:
-        return
-    old_title = getattr(instance, '_old_data', None)
-    if not old_title:
-        if instance.page.application_urls:
-            request_finished.connect(
-                trigger_restart,
-                dispatch_uid=DISPATCH_UID
-            )
-    else:
-        old_values = (
-            old_title.published,
-            old_title.page.application_urls,
-            old_title.page.application_namespace,
-            old_title.path,
-            old_title.slug,
-        )
-        new_values = (
-            instance.published,
-            instance.page.application_urls,
-            instance.page.application_namespace,
-            instance.path,
-            instance.slug,
-        )
-        if old_values != new_values and (old_values[2] or new_values[2]):
-            request_finished.connect(trigger_restart, dispatch_uid=DISPATCH_UID)
-
-
-def apphook_post_delete_title_checker(instance, **kwargs):
-    """
-    Check if this was an apphook
-    """
-    from cms.views import invalidate_cms_page_cache
-    invalidate_cms_page_cache()
-    if instance.page.application_urls:
-        request_finished.connect(trigger_restart, dispatch_uid=DISPATCH_UID)
-
-
-def apphook_post_delete_page_checker(instance, **kwargs):
-    """
-    Check if this was an apphook
-    """
-    if instance.application_urls:
-        request_finished.connect(trigger_restart, dispatch_uid=DISPATCH_UID)
-
-# import the logging library
-import logging
-
-# Get an instance of a logger
-logger = logging.getLogger(__name__)
+def set_restart_trigger():
+    request_finished.connect(trigger_restart, dispatch_uid=DISPATCH_UID)
 
 
 def trigger_restart(**kwargs):
@@ -107,7 +44,8 @@ def debug_server_restart(**kwargs):
             from imp import reload
             reload(cms.urls)
     if not 'test' in sys.argv:
-        msg = 'Application url changed and urls_need_reloading signal fired. Please reload the urls.py or restart the server\n'
+        msg = 'Application url changed and urls_need_reloading signal fired. ' \
+              'Please reload the urls.py or restart the server.\n'
         styles = color_style()
         msg = styles.NOTICE(msg)
         sys.stderr.write(msg)

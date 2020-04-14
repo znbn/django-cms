@@ -8,12 +8,26 @@ from django.utils.translation import ugettext_lazy as _
 from django.utils.six.moves.urllib.parse import urljoin
 
 from cms import constants
+from cms import __version__
 
 
 __all__ = ['get_cms_setting']
 
 
 class VERIFIED: pass  # need a unique identifier for CMS_LANGUAGES
+
+
+def _load_from_file(module_path):
+    """
+    Load a python module from its absolute filesystem path
+    """
+    from imp import load_module, PY_SOURCE
+
+    imported = None
+    if module_path:
+        with open(module_path, 'r') as openfile:
+            imported = load_module("mod", openfile, module_path, ('imported', 'r', PY_SOURCE))
+    return imported
 
 
 def default(name):
@@ -31,12 +45,13 @@ def default(name):
 
 DEFAULTS = {
     'TEMPLATE_INHERITANCE': True,
+    'DEFAULT_X_FRAME_OPTIONS': constants.X_FRAME_OPTIONS_INHERIT,
+    'TOOLBAR_SIMPLE_STRUCTURE_MODE': True,
     'PLACEHOLDER_CONF': {},
     'PERMISSION': False,
     # Whether to use raw ID lookups for users when PERMISSION is True
     'RAW_ID_USERS': False,
     'PUBLIC_FOR': 'all',
-    'CONTENT_CACHE_DURATION': 60,
     'APPHOOKS': [],
     'TOOLBARS': [],
     'SITE_CHOICES_CACHE_KEY': 'CMS:site_choices',
@@ -47,28 +62,38 @@ DEFAULTS = {
     'PAGE_CACHE': True,
     'PLACEHOLDER_CACHE': True,
     'PLUGIN_CACHE': True,
-    'CACHE_PREFIX': 'cms-',
+    'CACHE_PREFIX': 'cms_{}_'.format(__version__),
     'PLUGIN_PROCESSORS': [],
     'PLUGIN_CONTEXT_PROCESSORS': [],
     'UNIHANDECODE_VERSION': None,
     'UNIHANDECODE_DECODERS': ['ja', 'zh', 'kr', 'vn', 'diacritic'],
     'UNIHANDECODE_DEFAULT_DECODER': 'diacritic',
-    'MAX_PAGE_PUBLISH_REVERSIONS': 10,
-    'MAX_PAGE_HISTORY_REVERSIONS': 15,
+    'TOOLBAR_ANONYMOUS_ON': True,
     'TOOLBAR_URL__EDIT_ON': 'edit',
     'TOOLBAR_URL__EDIT_OFF': 'edit_off',
-    'TOOLBAR_URL__BUILD': 'build',
+    'TOOLBAR_URL__BUILD': 'structure',
     'TOOLBAR_URL__DISABLE': 'toolbar_off',
     'ADMIN_NAMESPACE': 'admin',
+    'APP_NAME': None,
+    'TOOLBAR_HIDE': False,
+    'INTERNAL_IPS': [],
+    'REQUEST_IP_RESOLVER': 'cms.utils.request_ip_resolvers.default_request_ip_resolver',
+    'PAGE_WIZARD_DEFAULT_TEMPLATE': constants.TEMPLATE_INHERITANCE_MAGIC,
+    'PAGE_WIZARD_CONTENT_PLUGIN': 'TextPlugin',
+    'PAGE_WIZARD_CONTENT_PLUGIN_BODY': 'body',
+    'PAGE_WIZARD_CONTENT_PLACEHOLDER': None,  # Use first placeholder it finds.
 }
 
 
 def get_cache_durations():
-    return {
-        'menus': getattr(settings, 'MENU_CACHE_DURATION', 60 * 60),
-        'content': get_cms_setting('CONTENT_CACHE_DURATION'),
+    """
+    Returns the setting: CMS_CACHE_DURATIONS or the defaults.
+    """
+    return getattr(settings, 'CMS_CACHE_DURATIONS', {
+        'menus': 60 * 60,
+        'content': 60,
         'permissions': 60 * 60,
-    }
+    })
 
 
 @default('CMS_MEDIA_ROOT')
@@ -92,7 +117,7 @@ def get_toolbar_url__edit_off():
 
 
 @default('CMS_TOOLBAR_URL__BUILD')
-def get_toolbar_url__build():
+def get_toolbar_url__structure():
     return get_cms_setting('TOOLBAR_URL__BUILD')
 
 
@@ -102,7 +127,6 @@ def get_toolbar_url__disable():
 
 
 def get_templates():
-    from cms.utils.django_load import load_from_file
     if getattr(settings, 'CMS_TEMPLATES_DIR', False):
         tpldir = getattr(settings, 'CMS_TEMPLATES_DIR', False)
         # CMS_TEMPLATES_DIR can either be a string poiting to the templates directory
@@ -113,8 +137,11 @@ def get_templates():
         # valid templates directory. Here we mimick what the filesystem and
         # app_directories template loaders do
         prefix = ''
-        # Relative to TEMPLATE_DIRS for filesystem loader
-        for basedir in settings.TEMPLATE_DIRS:
+        # Relative to TEMPLATE['DIRS'] for filesystem loader
+
+        path = [template['DIRS'][0] for template in settings.TEMPLATES]
+
+        for basedir in path:
             if tpldir.find(basedir) == 0:
                 prefix = tpldir.replace(basedir + os.sep, '')
                 break
@@ -130,15 +157,15 @@ def get_templates():
         config_path = os.path.join(tpldir, '__init__.py')
         # Try to load templates list and names from the template module
         # If module file is not present skip configuration and just dump the filenames as templates
-        if config_path:
-            template_module = load_from_file(config_path)
+        if os.path.isfile(config_path):
+            template_module = _load_from_file(config_path)
             templates = [(os.path.join(prefix, data[0].strip()), data[1]) for data in template_module.TEMPLATES.items()]
         else:
             templates = list((os.path.join(prefix, tpl), tpl) for tpl in os.listdir(tpldir))
     else:
         templates = list(getattr(settings, 'CMS_TEMPLATES', []))
     if get_cms_setting('TEMPLATE_INHERITANCE'):
-        templates.append((constants.TEMPLATE_INHERITANCE_MAGIC, _(constants.TEMPLATE_INHERITANCE_LABEL)))
+        templates.append((constants.TEMPLATE_INHERITANCE_MAGIC, _('Inherit the template of the nearest ancestor')))
     return templates
 
 
@@ -244,7 +271,7 @@ COMPLEX = {
     'UNIHANDECODE_HOST': get_unihandecode_host,
     'CMS_TOOLBAR_URL__EDIT_ON': get_toolbar_url__edit_on,
     'CMS_TOOLBAR_URL__EDIT_OFF': get_toolbar_url__edit_off,
-    'CMS_TOOLBAR_URL__BUILD': get_toolbar_url__build,
+    'CMS_TOOLBAR_URL__BUILD': get_toolbar_url__structure,
     'CMS_TOOLBAR_URL__DISABLE': get_toolbar_url__disable,
 }
 
@@ -252,8 +279,7 @@ COMPLEX = {
 def get_cms_setting(name):
     if name in COMPLEX:
         return COMPLEX[name]()
-    else:
-        return getattr(settings, 'CMS_%s' % name, DEFAULTS[name])
+    return getattr(settings, 'CMS_%s' % name, DEFAULTS[name])
 
 
 def get_site_id(site):

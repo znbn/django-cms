@@ -1,3 +1,5 @@
+.. _key-topics:
+
 ##########
 Key topics
 ##########
@@ -7,12 +9,16 @@ concerned with explaining *how to do things* than with helping you understand
 *how it works*.
 
 .. toctree::
-    :maxdepth: 2
+    :maxdepth: 1
 
-    menu_system
+    plugins
+    apphooks
     publishing
     multiple_languages
     i18n
     permissions
+    touch
+    menu_system
     commonly_used_plugins
     searchdocs
+    frontend-integration

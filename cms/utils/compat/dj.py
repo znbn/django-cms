@@ -1,25 +1,49 @@
+from django.apps import apps
 from django.conf import settings
 
-__all__ = ['is_installed', 'installed_apps']
+
+__all__ = ['is_installed', 'installed_apps', 'get_apps', 'get_app_paths']
 
 # import these directly from Django!
 from django.utils.encoding import (  # nopyflakes
     force_text as force_unicode, python_2_unicode_compatible,
 )
 
-try:  # pragma: no cover
-    from django.apps import apps
+try:
+    from django.utils.deprecation import MiddlewareMixin
+except ImportError:
+    class MiddlewareMixin(object): pass
 
-    def is_installed(app_name):
-        return apps.is_installed(app_name)
+try:
+    from django.urls import URLResolver  # nopyflakes
+    from django.urls.resolvers import RegexPattern, URLPattern  # nopyflakes
+except ImportError:
+    # django 1.11 support
+    from django.core.urlresolvers import RegexURLResolver as URLResolver, RegexURLPattern as URLPattern  # nopyflakes
+    class RegexPattern: pass
 
-    def installed_apps():
-        return [app.name for app in apps.get_app_configs()]
+try:
+    from django.urls import LocalePrefixPattern  # nopyflakes
+except ImportError:
+    # Only for django 1.11
+    from django.core.urlresolvers import LocaleRegexURLResolver as LocalePrefixPattern  # nopyflakes
 
-except ImportError:  # Django 1.6
 
-    def is_installed(app_name):
-        return app_name in settings.INSTALLED_APPS
+# TODO: move these helpers out of compat?
+def is_installed(app_name):
+    return apps.is_installed(app_name)
 
-    def installed_apps():
-        return settings.INSTALLED_APPS
+def installed_apps():
+    return [app.name for app in apps.get_app_configs()]
+
+def get_app_paths():
+    return [app.path for app in apps.get_app_configs()]
+
+def get_apps():
+    return [app.models_module for app in apps.get_app_configs()]
+
+
+def get_middleware():
+    if getattr(settings, 'MIDDLEWARE', None) is None:
+        return settings.MIDDLEWARE_CLASSES
+    return settings.MIDDLEWARE

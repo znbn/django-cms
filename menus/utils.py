@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-from __future__ import with_statement
-from contextlib import contextmanager
-import inspect
-from cms.models.titlemodels import Title
-from cms.utils import get_language_from_request
-from cms.utils.compat import DJANGO_1_6
-from cms.utils.i18n import force_language, hide_untranslated
 from django.conf import settings
-from django.core.urlresolvers import NoReverseMatch, reverse, resolve
-from django.utils import six
+from django.urls import NoReverseMatch, reverse, resolve
+
+from cms.utils import get_current_site, get_language_from_request
+from cms.utils.i18n import (
+    force_language,
+    get_default_language_for_site,
+    get_fallback_languages,
+    hide_untranslated,
+    is_valid_site_language,
+)
 
 
 def mark_descendants(nodes):
@@ -96,17 +97,43 @@ class DefaultLanguageChanger(object):
 
     def get_page_path(self, lang):
         page = getattr(self.request, 'current_page', None)
-        if page:
-            with force_language(lang):
-                try:
-                    return page.get_absolute_url(language=lang, fallback=False)
-                except (Title.DoesNotExist, NoReverseMatch):
-                    if hide_untranslated(lang) and settings.USE_I18N:
-                        return '/%s/' % lang
-                    else:
-                        return page.get_absolute_url(language=lang, fallback=True)
-        else:
+
+        if not page:
             return '/%s/' % lang if settings.USE_I18N else '/'
+
+        page_languages = page.get_published_languages()
+
+        if lang in page_languages:
+            return page.get_absolute_url(lang, fallback=False)
+
+        site = get_current_site()
+
+        if is_valid_site_language(lang, site_id=site.pk):
+            _valid_language = True
+            _hide_untranslated = hide_untranslated(lang, site.pk)
+        else:
+            _valid_language = False
+            _hide_untranslated = False
+
+        if _hide_untranslated and settings.USE_I18N:
+            return '/%s/' % lang
+
+        default_language = get_default_language_for_site(site.pk)
+
+        if not _valid_language and default_language in page_languages:
+            # The request language is not configured for the current site.
+            # Fallback to the default language configured for the current site.
+            return page.get_absolute_url(default_language, fallback=False)
+
+        if _valid_language:
+            fallbacks = get_fallback_languages(lang, site_id=site.pk) or []
+            fallbacks = [_lang for _lang in fallbacks if _lang in page_languages]
+        else:
+            fallbacks = []
+
+        if fallbacks:
+            return page.get_absolute_url(fallbacks[0], fallback=False)
+        return '/%s/' % lang if settings.USE_I18N else '/'
 
     def __call__(self, lang):
         page_language = get_language_from_request(self.request)
@@ -127,52 +154,10 @@ class DefaultLanguageChanger(object):
                 view_name = "%s:%s" % (view.namespace, view_name)
             url = None
             with force_language(lang):
-                with static_stringifier(view):  # This is a fix for Django < 1.7
-                    try:
-                        url = reverse(view_name, args=view.args, kwargs=view.kwargs, current_app=view.app_name)
-                    except NoReverseMatch:
-                        pass
+                try:
+                    url = reverse(view_name, args=view.args, kwargs=view.kwargs, current_app=view.app_name)
+                except NoReverseMatch:
+                    pass
             if url:
                 return url
         return '%s%s' % (self.get_page_path(lang), self.app_path)
-
-
-@contextmanager
-def static_stringifier(view):
-    """
-    In Django < 1.7 reverse tries to convert to string the arguments without
-    checking whether they are classes or instances.
-
-    This context manager monkeypatches the __unicode__ method of each view
-    argument if it's a class definition to render it a static method.
-    Before leaving we undo the monkeypatching.
-    """
-    if DJANGO_1_6:
-        for idx, arg in enumerate(view.args):
-            if inspect.isclass(arg):
-                if hasattr(arg, '__unicode__'):
-                    @staticmethod
-                    def custom_str():
-                        return six.text_type(arg)
-                    arg._original = arg.__unicode__
-                    arg.__unicode__ = custom_str
-                view.args[idx] = arg
-        for key, arg in view.kwargs.items():
-            if inspect.isclass(arg):
-                if hasattr(arg, '__unicode__'):
-                    @staticmethod
-                    def custom_str():
-                        return six.text_type(arg)
-                    arg._original = arg.__unicode__
-                    arg.__unicode__ = custom_str
-                view.kwargs[key] = arg
-    yield
-    if DJANGO_1_6:
-        for idx, arg in enumerate(view.args):
-            if inspect.isclass(arg):
-                if hasattr(arg, '__unicode__'):
-                    arg.__unicode__ = arg._original
-        for key, arg in view.kwargs.items():
-            if inspect.isclass(arg):
-                if hasattr(arg, '__unicode__'):
-                    arg.__unicode__ = arg._original

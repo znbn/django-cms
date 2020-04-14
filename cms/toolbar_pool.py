@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
+from collections import OrderedDict
+
+from django.core.exceptions import ImproperlyConfigured
+from django.utils.module_loading import autodiscover_modules, import_string
+
 from cms.exceptions import ToolbarAlreadyRegistered, ToolbarNotRegistered
 from cms.utils.conf import get_cms_setting
-from cms.utils.django_load import load, iterload_objects
-from django.core.exceptions import ImproperlyConfigured
-from django.utils.datastructures import SortedDict
 
 
 class ToolbarPool(object):
     def __init__(self):
-        self.toolbars = SortedDict()
+        self.toolbars = OrderedDict()
         self._discovered = False
         self.force_register = False
 
@@ -18,16 +20,17 @@ class ToolbarPool(object):
             #import all the modules
         toolbars = get_cms_setting('TOOLBARS')
         if toolbars:
-            for cls in iterload_objects(toolbars):
+            for path in toolbars:
+                cls = import_string(path)
                 self.force_register = True
                 self.register(cls)
                 self.force_register = False
         else:
-            load('cms_toolbar')
+            autodiscover_modules('cms_toolbars')
         self._discovered = True
 
     def clear(self):
-        self.toolbars = SortedDict()
+        self.toolbars = OrderedDict()
         self._discovered = False
 
     def register(self, toolbar):
@@ -55,7 +58,7 @@ class ToolbarPool(object):
         return self.toolbars
 
     def get_watch_models(self):
-        return sum((getattr(tb, 'watch_models', [])
+        return sum((list(getattr(tb, 'watch_models', []))
                     for tb in self.toolbars.values()), [])
 
 
